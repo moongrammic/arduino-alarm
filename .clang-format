@@ -1,0 +1,29 @@
+Language: Cpp
+BasedOnStyle: GNU
+IndentWidth: 4
+TabWidth: 4
+UseTab: Always
+ColumnLimit: 100
+AllowShortIfStatementsOnASingleLine: false
+BreakBeforeBraces: Allman
+AlignConsecutiveAssignments: AcrossEmptyLinesAndComments
+AlignConsecutiveMacros: AcrossEmptyLinesAndComments
+AlignTrailingComments: Always
+AlignArrayOfStructures: Left
+AllowShortBlocksOnASingleLine: Empty
+IndentCaseLabels: true
+
+#PackConstructorInitializers: Never
+#PackParameters: Never
+#PackArguments: Never
+#PackTemplateParameters: Never
+#PackArrays: Never
+#InsertTrailingCommas: Wrapped
+#Cpp11BracedListStyle: false
+
+NamespaceIndentation: All
+
+AlwaysBreakAfterReturnType: Automatic
+PointerAlignment: Left
+ReferenceAlignment: Left
+SpaceBeforeParens: Never
