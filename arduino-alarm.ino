@@ -6,6 +6,7 @@
 #define ENC_S1        DD4
 #define ENC_S2        DD5
 #define ENC_HOLD_TIME 10000
+#define CHAR_WIDTH    12
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
@@ -114,10 +115,12 @@ class Menu
 public:
   Menu(const char* name, uint8_t entry_count) : m_name(name), m_entry_count(entry_count)
   {
-    m_entries = (BasicMenuEntry*)malloc(sizeof(BasicMenuEntry*)); // Allocate space for pointers
+    m_entries  = (BasicMenuEntry*)malloc(sizeof(BasicMenuEntry*)); // Allocate space for pointers
+    m_name_len = strlen(m_name);
   }
   void handleInput(EncoderInput& input, MenuState& state) {}
   const char* m_name        = "null";
+  uint8_t m_name_len        = 0;
   BasicMenuEntry* m_entries = nullptr; // We dont know types of these entries, we can later cast
                                        // them to appropriate types by getting their first byte
   uint8_t m_entry_count     = 0;
@@ -145,20 +148,65 @@ public:
   int* m_data;
 };
 
-void dispUpdate()
-{
-  u8g2.clearBuffer();
-  u8g2.drawStr(0, 15, String(position).c_str());
-  u8g2.drawStr(32, 15, String(time).c_str());
-  u8g2.sendBuffer();
-}
-
 constexpr uint8_t menu_count = 2;
 Menu* menus                  = (Menu*)malloc(sizeof(Menu*) * menu_count);
 
+void drawHead()
+{
+  uint16_t x = 0;
+  for(uint8_t i = 0; i < menu_count; i++)
+  {
+    const char* name       = menus[i].m_name;
+    const uint8_t name_len = menus[i].m_name_len;
+    if(menuState.cur_menu == i)
+    {
+      u8g2.setDrawColor(255);
+      u8g2.drawBox(x, 0, name_len * CHAR_WIDTH - 3, CHAR_WIDTH + 1);
+      u8g2.setDrawColor(0);
+      u8g2.drawStr(x + 1, CHAR_WIDTH, name);
+    }
+    else
+    {
+      u8g2.setDrawColor(0);
+      u8g2.drawBox(x, 0, name_len * CHAR_WIDTH - 3, CHAR_WIDTH + 1);
+      u8g2.setDrawColor(255);
+      u8g2.drawStr(x + 1, CHAR_WIDTH, name);
+      Serial.println(name);
+    }
+    x += name_len * CHAR_WIDTH;
+  }
+}
+
+void dispUpdate()
+{
+  u8g2.clearBuffer();
+  if(encoderInput.keyHeld)
+  {
+    drawHead();
+  }
+  u8g2.sendBuffer();
+}
+
 void handleMenus()
 {
+
+  if(encoderInput.keyHeld)
+  {
+    if(encoderInput.turnedRight)
+    {
+      menuState.cur_menu++;
+      menuState.cur_line = 0;
+    }
+    else if(encoderInput.turnedLeft)
+    {
+      menuState.cur_menu--;
+      menuState.cur_line = 0;
+    }
+    menuState.cur_menu %= menu_count;
+  }
+
   Menu& curMenu = menus[menuState.cur_menu];
+
   curMenu.handleInput(encoderInput, menuState);
 }
 
@@ -202,20 +250,6 @@ void loop()
     Serial.println(position);
   }
   handleEncoder(encoderInput);
-
-  if(encoderInput.keyHeld)
-  {
-    if(encoderInput.turnedRight)
-    {
-      menuState.cur_menu++;
-      menuState.cur_line = 0;
-    }
-    else if(encoderInput.turnedLeft)
-    {
-      menuState.cur_menu--;
-      menuState.cur_line = 0;
-    }
-  }
 
   handleMenus();
 
