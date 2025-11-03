@@ -27,118 +27,118 @@ unsigned long long previousMillis;
 
 void setup()
 {
-    // put your setup code here, to run once:
-    Serial.begin(9600);
-    Serial.println("Start test!");
+  // put your setup code here, to run once:
+  Serial.begin(9600);
+  Serial.println("Start test!");
 
-    pinMode(ENC_S1, INPUT);
-    pinMode(ENC_S2, INPUT);
-    pinMode(ENC_BTN, INPUT);
-    pinMode(BEEPER, OUTPUT);
+  pinMode(ENC_S1, INPUT);
+  pinMode(ENC_S2, INPUT);
+  pinMode(ENC_BTN, INPUT);
+  pinMode(BEEPER, OUTPUT);
 
-    u8g2.begin();
-    u8g2.setFont(u8g2_font_ncenB10_tr);
+  u8g2.begin();
+  u8g2.setFont(u8g2_font_ncenB10_tr);
 }
 
 void handleEncoder()
 {
-    bool inc = false, dec = false;
-    bool b       = !digitalRead(ENC_S1);
-    bool a       = !digitalRead(ENC_S2);
-    bool cur_key = digitalRead(ENC_BTN);
+  bool inc = false, dec = false;
+  bool b       = !digitalRead(ENC_S1);
+  bool a       = !digitalRead(ENC_S2);
+  bool cur_key = digitalRead(ENC_BTN);
 }
 
 void loop()
 {
-    unsigned long currentMillis = millis(); // Get the current time
+  unsigned long currentMillis = millis(); // Get the current time
 
-    // Check if the interval has passed since the last count
-    if(currentMillis - previousMillis >= 1000)
+  // Check if the interval has passed since the last count
+  if(currentMillis - previousMillis >= 1000)
+  {
+    previousMillis = currentMillis;
+    time++;
+    update_screen = true;
+  }
+
+  // put your main code here, to run repeatedly:
+  bool inc = false, dec = false;
+  bool b           = !digitalRead(ENC_S1);
+  bool a           = !digitalRead(ENC_S2);
+  bool cur_key     = digitalRead(ENC_BTN);
+  bool key_onpress = cur_key != last_key;
+  if(a || b)
+  {
+    if(a && b)
     {
-        previousMillis = currentMillis;
-        time++;
+      if(!last_active)
+      {
         update_screen = true;
-    }
-
-    // put your main code here, to run repeatedly:
-    bool inc = false, dec = false;
-    bool b           = !digitalRead(ENC_S1);
-    bool a           = !digitalRead(ENC_S2);
-    bool cur_key     = digitalRead(ENC_BTN);
-    bool key_onpress = cur_key != last_key;
-    if(a || b)
-    {
-        if(a && b)
+        if(last_state_a)
         {
-            if(!last_active)
-            {
-                update_screen = true;
-                if(last_state_a)
-                {
-                    inc = true;
-                }
-                else
-                {
-                    dec = true;
-                }
-            }
-            last_active = true;
+          inc = true;
         }
-        last_state_a = a;
-    }
-    else
-    {
-        last_active = false;
-    }
-    if(lpp != position)
-    {
-        lpp = position;
-        Serial.println(position);
-    }
-
-    if(key_onpress)
-    {
-        change_time = !change_time;
-    }
-
-    if(change_time)
-    {
-        if(inc)
+        else
         {
-            time++;
+          dec = true;
         }
-        else if(dec)
-        {
-            time--;
-        }
+      }
+      last_active = true;
     }
+    last_state_a = a;
+  }
+  else
+  {
+    last_active = false;
+  }
+  if(lpp != position)
+  {
+    lpp = position;
+    Serial.println(position);
+  }
 
-    if(update_screen)
-    {
-        upd_timer      = upd_timeout;
-        screen_updated = false;
-        update_screen  = 0;
-    }
+  if(key_onpress)
+  {
+    change_time = !change_time;
+  }
 
-    if(upd_timer <= 0)
+  if(change_time)
+  {
+    if(inc)
     {
-        if(!screen_updated)
-        {
-            dispUpdate();
-            screen_updated = true;
-        }
+      time++;
     }
-    else
+    else if(dec)
     {
-        upd_timer--;
+      time--;
     }
-    last_key = cur_key;
+  }
+
+  if(update_screen)
+  {
+    upd_timer      = upd_timeout;
+    screen_updated = false;
+    update_screen  = 0;
+  }
+
+  if(upd_timer <= 0)
+  {
+    if(!screen_updated)
+    {
+      dispUpdate();
+      screen_updated = true;
+    }
+  }
+  else
+  {
+    upd_timer--;
+  }
+  last_key = cur_key;
 }
 
 void dispUpdate()
 {
-    u8g2.clearBuffer();
-    u8g2.drawStr(0, 15, String(position).c_str());
-    u8g2.drawStr(32, 15, String(time).c_str());
-    u8g2.sendBuffer();
+  u8g2.clearBuffer();
+  u8g2.drawStr(0, 15, String(position).c_str());
+  u8g2.drawStr(32, 15, String(time).c_str());
+  u8g2.sendBuffer();
 }
