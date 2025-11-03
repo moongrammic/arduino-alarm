@@ -2,7 +2,7 @@ default_fqbn: arduino:avr:nano
 default_port: /dev/ttyUSB0
 
 profiles:
-  basic:
+  nano:
     fqbn: arduino:avr:nano
 
     platforms:
@@ -16,4 +16,18 @@ profiles:
     port_config:
       baudrate: 9600
 
-default_profile: nanorp
+  mega:
+    fqbn: arduino:avr:mega
+
+    platforms:
+      - platform: arduino:avr (1.8.4)
+
+    libraries:
+      - U8g2 (2.35.30)
+
+    port: /dev/ttyUSB0
+
+    port_config:
+      baudrate: 9600
+
+default_profile: nano
