@@ -1,8 +1,8 @@
 Language: Cpp
 BasedOnStyle: GNU
-IndentWidth: 4
-TabWidth: 4
-UseTab: Always
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
 ColumnLimit: 100
 AllowShortIfStatementsOnASingleLine: false
 BreakBeforeBraces: Allman
