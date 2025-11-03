@@ -6,6 +6,9 @@
 #define ENC_S1        DD4
 #define ENC_S2        DD5
 #define ENC_HOLD_TIME 10000
+
+#define SCR_WIDTH     128
+#define SCR_HEIGHT    64
 #define CHAR_WIDTH    12
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
@@ -154,10 +157,15 @@ Menu* menus                  = (Menu*)malloc(sizeof(Menu*) * menu_count);
 void drawHead()
 {
   uint16_t x = 0;
+  u8g2.setDrawColor(0);
+  u8g2.drawBox(0, 0, SCR_WIDTH, CHAR_WIDTH + 1);
+  u8g2.setDrawColor(255);
+  u8g2.drawLine(0, CHAR_WIDTH + 1, SCR_WIDTH, CHAR_WIDTH + 1);
   for(uint8_t i = 0; i < menu_count; i++)
   {
     const char* name       = menus[i].m_name;
     const uint8_t name_len = menus[i].m_name_len;
+
     if(menuState.cur_menu == i)
     {
       u8g2.setDrawColor(255);
@@ -167,8 +175,6 @@ void drawHead()
     }
     else
     {
-      u8g2.setDrawColor(0);
-      u8g2.drawBox(x, 0, name_len * CHAR_WIDTH - 3, CHAR_WIDTH + 1);
       u8g2.setDrawColor(255);
       u8g2.drawStr(x + 1, CHAR_WIDTH, name);
       Serial.println(name);
@@ -177,13 +183,38 @@ void drawHead()
   }
 }
 
+void drawMainMenu()
+{
+
+  u8g2.setFont(u8g2_font_ncenB24_tr);
+  u8g2.setDrawColor(255);
+  u8g2.drawBox(SCR_WIDTH / 2 - (24 * 2) - 6, 12, 24 * 4.5, 48);
+  u8g2.setDrawColor(0);
+  u8g2.drawStr(SCR_WIDTH / 2 - (24 * 2) - 2, 40, "TE:ST");
+
+  u8g2.setFont(u8g2_font_ncenB10_tr);
+}
+
 void dispUpdate()
 {
   u8g2.clearBuffer();
+
+  switch(menuState.cur_menu)
+  {
+    case 0:
+      drawMainMenu();
+      break;
+    case 1:
+      break;
+    default:
+      menuState.cur_menu = 0;
+  }
+
   if(encoderInput.keyHeld)
   {
     drawHead();
   }
+
   u8g2.sendBuffer();
 }
 
