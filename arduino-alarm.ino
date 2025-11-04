@@ -35,17 +35,15 @@ struct MenuState
   uint8_t cur_line = 0;
 };
 
-int position         = 0;
-int lpp              = 0;
-uint16_t upd_timeout = 10000;
-int upd_timer        = 0;
+#define upd_timeout 10000
+int upd_timer       = 0;
 
-bool screen_updated  = false;
-bool update_screen   = false;
+bool screen_updated = false;
+bool update_screen  = false;
 
-bool change_time     = false;
+bool change_time    = false;
 
-long time            = 3660;
+long time           = 3660;
 unsigned long long previousMillis;
 
 struct EncoderInput encoderInput;
@@ -156,6 +154,9 @@ public:
 constexpr uint8_t menu_count = 2;
 Menu* menus                  = (Menu*)malloc(sizeof(Menu*) * menu_count);
 
+void drawTextBox(uint8_t x, uint8_t y, uint8_t color) {
+} // TODO: ADD THIS AND MAKE drawHead use this
+
 void drawHead()
 {
   uint16_t x                     = 0;
@@ -216,6 +217,8 @@ void drawMainMenu()
   }
 }
 
+void drawSetTime() {}
+
 void dispUpdate()
 {
   u8g2.clearBuffer();
@@ -226,6 +229,7 @@ void dispUpdate()
       drawMainMenu();
       break;
     case 1:
+      drawSetTime();
       break;
     default:
       menuState.cur_menu = 0;
@@ -296,11 +300,6 @@ void loop()
     update_screen = true;
   }
 
-  if(lpp != position)
-  {
-    lpp = position;
-    Serial.println(position);
-  }
   handleEncoder(encoderInput);
 
   handleMenus();
