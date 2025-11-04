@@ -9,7 +9,9 @@
 
 #define SCR_WIDTH     128
 #define SCR_HEIGHT    64
-#define CHAR_WIDTH    12
+#define CHAR_WIDTH    9
+#define CHAR_HEIGHT   12
+#define CHAR_MARGIN   2
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
@@ -43,7 +45,7 @@ bool update_screen   = false;
 
 bool change_time     = false;
 
-long time            = 0;
+long time            = 3660;
 unsigned long long previousMillis;
 
 struct EncoderInput encoderInput;
@@ -156,11 +158,11 @@ Menu* menus                  = (Menu*)malloc(sizeof(Menu*) * menu_count);
 
 void drawHead()
 {
-  uint16_t x = 0;
+  uint16_t x                     = 0;
+  constexpr uint16_t text_height = CHAR_HEIGHT + CHAR_MARGIN;
   u8g2.setDrawColor(0);
-  u8g2.drawBox(0, 0, SCR_WIDTH, CHAR_WIDTH + 1);
-  u8g2.setDrawColor(255);
-  u8g2.drawLine(0, CHAR_WIDTH + 1, SCR_WIDTH, CHAR_WIDTH + 1);
+  u8g2.drawBox(0, 0, SCR_WIDTH, text_height + CHAR_MARGIN);
+
   for(uint8_t i = 0; i < menu_count; i++)
   {
     const char* name       = menus[i].m_name;
@@ -169,30 +171,49 @@ void drawHead()
     if(menuState.cur_menu == i)
     {
       u8g2.setDrawColor(255);
-      u8g2.drawBox(x, 0, name_len * CHAR_WIDTH - 3, CHAR_WIDTH + 1);
+      u8g2.drawBox(x, 0, name_len * CHAR_WIDTH + CHAR_MARGIN * 2, CHAR_HEIGHT + CHAR_MARGIN * 2);
       u8g2.setDrawColor(0);
-      u8g2.drawStr(x + 1, CHAR_WIDTH, name);
+      u8g2.drawStr(x + CHAR_MARGIN, text_height, name);
     }
     else
     {
+      u8g2.setDrawColor(0);
+      u8g2.drawBox(x, 0, name_len * CHAR_WIDTH + CHAR_MARGIN * 2, CHAR_HEIGHT + CHAR_MARGIN * 2);
       u8g2.setDrawColor(255);
-      u8g2.drawStr(x + 1, CHAR_WIDTH, name);
-      Serial.println(name);
+      u8g2.drawStr(x + CHAR_MARGIN, text_height, name);
     }
-    x += name_len * CHAR_WIDTH;
+    u8g2.setDrawColor(255);
+    u8g2.drawLine(0, text_height + CHAR_MARGIN, SCR_WIDTH, text_height + CHAR_MARGIN);
+    x += (name_len * CHAR_WIDTH) + CHAR_MARGIN * 2;
   }
 }
 
 void drawMainMenu()
 {
+  { // Time draw scope
+    u8g2.setFont(u8g2_font_profont29_tr);
+    u8g2.setDrawColor(255);
+    u8g2.drawBox(0, 12, 24 * 4, 32);
+    u8g2.setDrawColor(0);
+    constexpr uint32_t secs_day = 86400;
+    constexpr uint32_t secs_hrs = 3600;
+    constexpr uint32_t secs_min = 60;
 
-  u8g2.setFont(u8g2_font_ncenB24_tr);
-  u8g2.setDrawColor(255);
-  u8g2.drawBox(SCR_WIDTH / 2 - (24 * 2) - 6, 12, 24 * 4.5, 48);
-  u8g2.setDrawColor(0);
-  u8g2.drawStr(SCR_WIDTH / 2 - (24 * 2) - 2, 40, "TE:ST");
+    uint32_t hrs                = (time % secs_day / secs_hrs);
+    uint32_t mins               = ((time % secs_day) % secs_hrs) / secs_min;
 
-  u8g2.setFont(u8g2_font_ncenB10_tr);
+    char to_prt[6]              = "\0\0:\0\0";
+    to_prt[1]                   = (hrs % 10) + '0';
+    to_prt[0]                   = (hrs / 10 % 10) + '0';
+    to_prt[4]                   = (mins % 10) + '0';
+    to_prt[3]                   = (mins / 10 % 10) + '0';
+
+    u8g2.drawStr(6, 34, to_prt);
+
+    u8g2.setFont(u8g2_font_profont17_mf);
+  }
+  { // Icons draw scope
+  }
 }
 
 void dispUpdate()
@@ -253,7 +274,7 @@ void setup()
   pinMode(BEEPER, OUTPUT);
 
   u8g2.begin();
-  u8g2.setFont(u8g2_font_ncenB10_tr);
+  u8g2.setFont(u8g2_font_profont17_mf);
 
   // Build menus
   int zerofill[]        = { 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // A bit cringe but why the fuck not
@@ -271,8 +292,8 @@ void loop()
   if(currentMillis - previousMillis >= 1000)
   {
     previousMillis = currentMillis;
-    // time++;
-    update_screen  = true;
+    time += 30;
+    update_screen = true;
   }
 
   if(lpp != position)
