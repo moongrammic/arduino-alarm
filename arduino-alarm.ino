@@ -3,8 +3,8 @@
 
 #define BEEPER        DD2
 #define ENC_BTN       DD3
-#define ENC_S1        DD4
-#define ENC_S2        DD5
+#define ENC_S1        DD5
+#define ENC_S2        DD4
 #define ENC_HOLD_TIME 10000
 
 #define SCR_WIDTH     128
@@ -12,7 +12,7 @@
 #define CHAR_WIDTH    9
 #define CHAR_HEIGHT   12
 #define CHAR_MARGIN   2
-#define ENTRY_HEIGHT  CHAR_HEIGHT + CHAR_MARGIN * 2
+#define ENTRY_HEIGHT  (CHAR_HEIGHT + CHAR_MARGIN * 2 + 2)
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
@@ -37,7 +37,7 @@ struct MenuState
   bool locked      = false;
 };
 
-constexpr uint16_t upd_timeout = 10000;
+constexpr uint16_t upd_timeout = 2500;
 uint16_t upd_timer             = 0;
 
 bool screen_updated            = false;
@@ -54,14 +54,14 @@ void handleEncoder(struct EncoderInput& write_to)
   *(uint32_t*)(&write_to) = 0; // a little optimization :3
   bool b                  = !digitalRead(ENC_S1);
   bool a                  = !digitalRead(ENC_S2);
-  bool inp_btn            = digitalRead(ENC_BTN);
-  write_to.keyPressed     = inp_btn && (inp_btn != write_to.last_key);
+  bool inp_btn            = !digitalRead(ENC_BTN);
+  write_to.keyPressed     = !inp_btn && (inp_btn != write_to.last_key) && write_to.timer != 0;
 
   if(inp_btn)
   {
     if(write_to.timer == 0)
     {
-      if(!write_to.keyPressed)
+      if(inp_btn == write_to.last_key)
       {
         write_to.keyHeld = true;
       }
@@ -120,6 +120,7 @@ public:
     // oled.setDrawColor(color);
     // oled.drawBox(0, ypos, 128, ENTRY_HEIGHT);
   };
+  void handleInput() {};
   MenuEntryType m_type = MENU_ENTRY_UNKNOWN;
 };
 
@@ -141,9 +142,33 @@ public:
     oled.setDrawColor(color);
     oled.drawBox(0, ypos, 128, ENTRY_HEIGHT);
     oled.setDrawColor(255 - color);
-    oled.drawStr(16, ypos + CHAR_MARGIN + CHAR_HEIGHT, m_name);
+    oled.drawStr(CHAR_MARGIN, ypos + CHAR_MARGIN + CHAR_HEIGHT, m_name);
+    for(uint8_t i = 0; i < m_data_count; i++)
+    {
+      oled.setDrawColor(m_cur_selected == i ? 255 - color : color);
+      oled.drawStr(40 + (CHAR_WIDTH * 3 + CHAR_MARGIN * 2) * i, ypos + CHAR_MARGIN + CHAR_HEIGHT,
+                   String(m_data[i]).c_str());
+    }
   };
-  uint8_t m_data_count = 0;
+  void handleInput()
+  {
+    if(encoderInput.keyPressed)
+    {
+      m_cur_selected++;
+      if(m_cur_selected >= m_data_count)
+      {
+        m_cur_selected = -1;
+      }
+    }
+    if(m_cur_selected < m_data_count)
+    {
+      menuState.locked = true;
+    }
+    else
+      return;
+  };
+  uint8_t m_cur_selected = -1;
+  uint8_t m_data_count   = 0;
   const char* m_name;
   int* m_data;
 };
@@ -153,26 +178,48 @@ class Menu
 public:
   Menu(const char* name, uint8_t entry_count) : m_name(name), m_entry_count(entry_count)
   {
-    m_entries  = (BasicMenuEntry*)malloc(sizeof(BasicMenuEntry*)
-                                         * m_entry_count); // Allocate space for pointers
+    m_entries
+        = (BasicMenuEntry**)malloc(sizeof(void*) * m_entry_count); // Allocate space for pointers
     m_name_len = strlen(m_name);
   }
-  void handleInput(EncoderInput& input, MenuState& state)
+  void handleInput()
   {
-    if(!state.locked)
+    if(m_entries != nullptr)
+    {
+      for(uint8_t i = 0; i < m_entry_count; i++)
+      {
+        if(i != menuState.cur_line)
+          continue;
+        BasicMenuEntry* entry    = m_entries[i];
+        const MenuEntryType type = entry->m_type;
+        switch(type)
+        {
+          case MENU_ENTRY_NUMBER:
+            ((MenuEntryNumber*)entry)->handleInput();
+            break;
+          default:
+            entry->handleInput();
+        }
+      }
+    }
+
+    if(!menuState.locked)
     {
       if(encoderInput.turnedRight)
       {
         menuState.cur_line++;
+        update_screen = true;
       }
       else if(encoderInput.turnedLeft)
       {
+        if(menuState.cur_line == 0)
+          menuState.cur_line = m_entry_count;
         menuState.cur_line--;
+        update_screen = true;
       }
-      if(menuState.cur_line != -1 && menuState.cur_line > m_entry_count)
-      {
-        menuState.cur_line = -1;
-      }
+
+      if(menuState.cur_line >= m_entry_count)
+        menuState.cur_line = 0;
     }
   }
   void drawEntries()
@@ -181,36 +228,33 @@ public:
     if(m_entries == nullptr)
     {
       oled.setDrawColor(255);
-      oled.drawStr(16, 64, "No entr");
+      oled.drawStr(16, 64, "No entry");
       return;
     }
     for(uint8_t i = 0; i < m_entry_count; i++)
     {
-      BasicMenuEntry* entry    = (m_entries + i);
-      const MenuEntryType type = entry->m_type;
-      char c[2]                = "0";
-      c[0] += type;
-      oled.setDrawColor(255);
-      oled.drawStr(16, 64, c);
+      BasicMenuEntry* entry     = m_entries[i];
+      const MenuEntryType type  = entry->m_type;
+      const uint8_t is_selected = (i == menuState.cur_line) ? 255 : 0;
       switch(type)
       {
         case MENU_ENTRY_NUMBER:
-          ((MenuEntryNumber*)entry)->Draw(i * ENTRY_HEIGHT, 255);
+          ((MenuEntryNumber*)entry)->Draw(i * ENTRY_HEIGHT, is_selected);
           break;
         default:
-          entry->Draw(i * ENTRY_HEIGHT, 255);
+          entry->Draw(i * ENTRY_HEIGHT, is_selected);
       }
     }
   }
-  const char* m_name        = "null";
-  uint8_t m_name_len        = 0;
-  BasicMenuEntry* m_entries = nullptr; // We dont know types of these entries, we can later cast
-                                       // them to appropriate types by getting their first byte
-  uint8_t m_entry_count     = 0;
+  const char* m_name         = "null";
+  uint8_t m_name_len         = 0;
+  BasicMenuEntry** m_entries = nullptr; // We dont know types of these entries, we can later cast
+                                        // them to appropriate types by getting their first byte
+  uint8_t m_entry_count      = 0;
 };
 
 constexpr uint8_t menu_count = 2;
-Menu* menus                  = (Menu*)malloc(sizeof(Menu*) * menu_count);
+Menu* menus                  = (Menu*)malloc(sizeof(Menu) * menu_count);
 
 void drawTextBox(const uint8_t x, const uint8_t y, const uint8_t color, const char* text,
                  const uint8_t text_length)
@@ -294,13 +338,20 @@ void dispUpdate()
   oled.sendBuffer();
 }
 
+void handleSetTime() {};
+
 void handleMenus()
 {
+  Menu& curMenu = menus[menuState.cur_menu];
+
+  curMenu.handleInput();
+
   switch(menuState.cur_menu)
   {
     case 0:
       break;
     case 1:
+      handleSetTime();
       break;
     default:
       menuState.cur_menu = 0;
@@ -313,23 +364,22 @@ void handleMenus()
   {
     if(encoderInput.keyHeld)
     {
+      menuState.locked = true;
       if(encoderInput.turnedRight)
       {
         menuState.cur_menu++;
         menuState.cur_line = -1;
+        update_screen      = true;
       }
       else if(encoderInput.turnedLeft)
       {
         menuState.cur_menu--;
         menuState.cur_line = -1;
+        update_screen      = true;
       }
       menuState.cur_menu %= menu_count;
     }
   }
-
-  Menu& curMenu = menus[menuState.cur_menu];
-
-  curMenu.handleInput(encoderInput, menuState);
 }
 
 void setup()
@@ -344,11 +394,10 @@ void setup()
   pinMode(BEEPER, OUTPUT);
 
   // Build menus
-  // int zerofill[]        = { 0, 0, 0, 0, 0, 0, 0, 0, 0 }; // A bit cringe but why the fuck not
-  // menus[0]              = Menu("MAIN", 0);
-  menus[1]              = Menu("ST", 1);
-  menus[1].m_entries[0] = MenuEntryNumber(2, ""); // MenuEntryNumber(2, "Time"); // Time
-  // menus[1].m_entries[1] = MenuEntryNumber(3, zerofill, "Date"); // Date
+  menus[0]              = Menu("MAIN", 0);
+  menus[1]              = Menu("ST", 2);
+  menus[1].m_entries[0] = new MenuEntryNumber(2, "Time"); // Time
+  menus[1].m_entries[1] = new MenuEntryNumber(3, "Date"); // Date
 
   oled.begin();
   oled.setFont(u8g2_font_profont17_mf);
@@ -356,6 +405,7 @@ void setup()
 
 void loop()
 {
+  menuState.locked            = false;
   unsigned long currentMillis = millis(); // Get the current time
 
   // Check if the interval has passed since the last count
