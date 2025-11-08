@@ -164,6 +164,14 @@ public:
     {
       menuState.locked = true;
     }
+    if(m_cur_selected == -1)
+    {
+      return;
+    }
+    if(encoderInput.turnedRight)
+      m_data[m_cur_selected]++;
+    if(encoderInput.turnedLeft)
+      m_data[m_cur_selected]--;
     else
       return;
   };
