@@ -1,776 +1,329 @@
 #include <Wire.h>
 #include <GyverOLED.h>
+#include <EncButton.h>
+#include <TimeLib.h>
+#include <EEPROM.h>
 
-// --- ИНИЦИАЛИЗАЦИЯ ДИСПЛЕЯ (SSD1306 128x64 I2C) ---
-GyverOLED<SSD1306_128x64, OLED_NO_BUFFER> oled;
+GyverOLED<SSD1306_128x64, OLED_NO_BUFFER> oled; 
+EncButton eb(2, 3, 4);
 
-// --- ПИНЫ ---
-#define PIN_ENC_CLK 2
-#define PIN_ENC_DT  3
-#define PIN_ENC_SW  4
-#define PIN_BUZZER  8
-#define PIN_LDR     A0
+#define BUZZER_PIN 8
+#define MAX_ALARMS 5
+#define ALARM_EMPTY_MARKER 255
 
-// --- ПЕРЕМЕННЫЕ ВРЕМЕНИ ---
-unsigned long lastScreenUpdate = 0; // Переменная для таймера экрана
-unsigned long lastTick = 0;   // Для отсчета секунд
-unsigned long lastSync = 0;   // Для авто-синхронизации (опционально)
-int year, month, day, hour, minute, second;
-bool timeSet = false;         // Получили ли мы время от ПК?
-
-// --- СОСТОЯНИЯ ИНТЕРФЕЙСА ---
-enum State {
-  STATE_CLOCK,         // 0: Главное меню (Часы)
-  STATE_ALARMS_LIST,   // 1: Список будильников
-  STATE_SETTINGS_TIME, // 2: Настройка даты/времени
-  STATE_ADD_ALARM,     // 3: Добавление/Редактирование будильника
-  STATE_DELETE_ALARM   // 4: Подтверждение удаления
-};
-
-State currentState = STATE_CLOCK;
-
-// --- СТРУКТУРА БУДИЛЬНИКА ---
 struct Alarm {
-  int hour;
-  int minute;
-  bool active;
-  // Дни недели: Пн, Вт, Ср, Чт, Пт, Сб, Вс
-  bool days[7];
+  uint8_t hour;
+  uint8_t minute;
+  bool enabled;
+  uint8_t days; 
 };
 
-// --- ПЕРЕМЕННЫЕ ДЛЯ БУДИЛЬНИКОВ ---
-const int MAX_ALARMS = 5; // Максимальное количество будильников
-Alarm alarms[MAX_ALARMS]; // Массив будильников
-int activeAlarmCount = 0; // Сколько будильников активно
-int currentFocus = 0;     // На каком элементе (будильнике) мы сейчас в списке
-int editingAlarmIndex = -1; // Индекс редактируемого будильника (-1 = новый)
+Alarm alarms[MAX_ALARMS];
+enum Screen { SCREEN_MAIN, SCREEN_MENU, SCREEN_EDIT_ALARM };
+Screen currentScreen = SCREEN_MAIN;
 
-// --- СОСТОЯНИЕ БУДИЛЬНИКА ---
+int8_t menuCursor = 0;       
+int8_t editAlarmIndex = -1;  
+uint8_t editStep = 0;        
+int8_t dayCursor = 0;        
+uint8_t tempHour, tempMinute, tempDays;
+
+bool needRedraw = true;
 bool isAlarmRinging = false;
-unsigned long buzzerTimer = 0;
-bool buzzerState = false;
+uint32_t lastBlink = 0;
+bool blinkState = true;
 
-// --- ЭНКОДЕР ---
-volatile int encoderPos = 0; // Обновляется прерыванием
-int lastEncoderPos = 0;      // Предыдущее значение
-unsigned long lastButtonPress = 0; // Антидребезг кнопки
-unsigned long buttonPressStart = 0; // Для определения длинного нажатия
-bool buttonPressed = false;
+const char* dayNames[] = {"Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"};
 
-// --- ПЕРЕМЕННЫЕ ДЛЯ РЕДАКТИРОВАНИЯ БУДИЛЬНИКА ---
-int editFocus = 0; // 0=активность, 1=час, 2=минута, 3-9=дни недели, 10=сохранить
-Alarm alarmToEdit; // Временный будильник для редактирования
+// Переменные для отслеживания изменений (умная отрисовка)
+uint8_t lastStep = 255;
+int8_t lastD = -1;
 
-// Убираем меню, рисуем список вручную
+void printCentered(int y, String text, int scale = 1) {
+  oled.setScale(scale);
+  int x = (128 - text.length() * 6 * scale) / 2;
+  oled.setCursor(x < 0 ? 0 : x, y);
+  oled.print(text);
+}
 
-// Обработчик прерывания энкодера
-void readEncoder() {
-  int dtValue = digitalRead(PIN_ENC_DT);
-  if (dtValue == HIGH) {
-    encoderPos++;
-  } else {
-    encoderPos--;
+// --- СЕРВИСНЫЕ ФУНКЦИИ ---
+void loadAlarms() {
+  EEPROM.get(0, alarms);
+  if (alarms[0].hour > 23 && alarms[0].hour != ALARM_EMPTY_MARKER) {
+    for (int i = 0; i < MAX_ALARMS; i++) {
+      alarms[i].hour = ALARM_EMPTY_MARKER;
+      alarms[i].days = 127; 
+      alarms[i].enabled = false;
+    }
+  }
+}
+
+bool syncTimeFromPC() {
+  Serial.println("GET_TIME");
+  unsigned long start = millis();
+  while (millis() - start < 3000) {
+    if (Serial.available()) {
+      if (Serial.read() == 'S') {
+        char buf[15];
+        Serial.readBytes(buf, 14);
+        buf[14] = '\0';
+        int year   = (buf[0] - '0') * 1000 + (buf[1] - '0') * 100 + (buf[2] - '0') * 10 + (buf[3] - '0');
+        int month  = (buf[4] - '0') * 10   + (buf[5] - '0');
+        int day    = (buf[6] - '0') * 10   + (buf[7] - '0');
+        int hour   = (buf[8] - '0') * 10   + (buf[9] - '0');
+        int minute = (buf[10] - '0') * 10  + (buf[11] - '0');
+        int second = (buf[12] - '0') * 10  + (buf[13] - '0');
+        setTime(hour, minute, second, day, month, year);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void saveAlarms() { EEPROM.put(0, alarms); }
+
+void checkAlarms() {
+  static uint8_t lastM = 255;
+  if (minute() != lastM) {
+    lastM = minute();
+    if (currentScreen == SCREEN_MAIN) needRedraw = true;
+    
+    if (isAlarmRinging) return;
+    uint8_t currentDayBit = (weekday() == 1) ? 6 : (weekday() - 2);
+    for (int i = 0; i < MAX_ALARMS; i++) {
+      if (alarms[i].enabled && alarms[i].hour == hour() && alarms[i].minute == minute() && ((alarms[i].days >> currentDayBit) & 1)) {
+        isAlarmRinging = true;
+        tone(BUZZER_PIN, 2000);
+        needRedraw = true;
+      }
+    }
+  }
+}
+
+// --- ОТРИСОВКА ---
+
+void drawMainScreen() {
+  oled.clear();
+  String t = (hour() < 10 ? "0" : "") + String(hour()) + ":" + (minute() < 10 ? "0" : "") + String(minute());
+  printCentered(2, t, 3);
+  String d = String(day()) + "." + String(month()) + "." + String(year());
+  printCentered(6, d, 1);
+  if (isAlarmRinging) printCentered(0, "!!! ПОДЪЕМ !!!", 1);
+}
+
+void drawMenu() {
+  oled.clear();
+  printCentered(0, "СПИСОК БУДИЛЬНИКОВ", 1);
+  oled.fastLineH(9, 0, 127);
+  
+  if (menuCursor < MAX_ALARMS) {
+    String s = "Будильник #" + String(menuCursor + 1);
+    printCentered(2, s, 1);
+    
+    String info;
+    if (alarms[menuCursor].hour == ALARM_EMPTY_MARKER) {
+      info = " --:-- (ПУСТО) ";
+    } else {
+      info = (alarms[menuCursor].hour < 10 ? "0" : "") + String(alarms[menuCursor].hour) + ":" + 
+             (alarms[menuCursor].minute < 10 ? "0" : "") + String(alarms[menuCursor].minute) + 
+             (alarms[menuCursor].enabled ? " [ВКЛ]" : " [ВЫКЛ]");
+    }
+    
+    oled.invertText(true);
+    printCentered(4, info, 1);
+    oled.invertText(false);
+    
+    // Подсказка меняется в зависимости от того, пустой будильник или нет
+    if (alarms[menuCursor].hour != ALARM_EMPTY_MARKER) {
+      printCentered(6, "Наж+Поворот: ВКЛ/ВЫКЛ", 1);
+    } else {
+      printCentered(6, "Клик: Создать", 1);
+    }
+  } 
+  else if (menuCursor == MAX_ALARMS) {
+    oled.invertText(true);
+    printCentered(4, " >>> ВЫХОД <<< ", 1);
+    oled.invertText(false);
+  }
+}
+
+void drawEditAlarm() {
+  // Полная очистка только при смене этапа настройки
+  if (lastStep != editStep) {
+    oled.clear();
+    printCentered(0, "НАСТРОЙКА", 1);
+    lastStep = editStep;
+  }
+
+  // Отрисовка Времени
+  oled.setScale(2);
+  oled.setCursor(34, 2);
+  
+  if (editStep == 0 && !blinkState) oled.print("  "); 
+  else { if(tempHour < 10) oled.print("0"); oled.print(tempHour); }
+  
+  oled.print(":");
+  
+  if (editStep == 1 && !blinkState) oled.print("  "); 
+  else { if(tempMinute < 10) oled.print("0"); oled.print(tempMinute); }
+
+  // Отрисовка Дней недели
+  oled.setScale(1);
+  for (int d = 0; d < 7; d++) {
+    oled.setCursor(10 + (d * 16), 5);
+    
+    if (editStep == 2 && dayCursor == d) oled.invertText(true);
+    oled.print(dayNames[d]);
+    oled.invertText(false);
+    
+    // Индикатор активности дня (полоска снизу)
+    if ((tempDays >> d) & 1) {
+      oled.rect(10 + (d * 16), 48, 10 + (d * 16) + 10, 49, 1);
+    } else {
+      // Стираем полоску двумя линиями (черный цвет = 0)
+      for (int i = 0; i < 11; i++) {
+        oled.dot(10 + (d * 16) + i, 48, 0);
+        oled.dot(10 + (d * 16) + i, 49, 0);
+      }
+    }
+  }
+
+  // Кнопка сохранения
+  if (editStep == 2 && dayCursor == 7) oled.invertText(true);
+  printCentered(7, " СОХРАНИТЬ ", 1);
+  oled.invertText(false);
+}
+
+// --- LOOP & INPUT ---
+
+void handleInput() {
+  eb.tick();
+
+  if (isAlarmRinging) {
+    if (eb.click() || eb.turn() || eb.hold()) {
+      isAlarmRinging = false;
+      noTone(BUZZER_PIN);
+      needRedraw = true;
+    }
+    return;
+  }
+
+  // 1. ПОВОРОТ
+  if (eb.turn()) {
+    needRedraw = true;
+    int dir = eb.dir();
+
+    if (currentScreen == SCREEN_MENU) {
+      // ПРОВЕРКА: зажата ли кнопка прямо в момент поворота
+      if (eb.pressing() && menuCursor < MAX_ALARMS && alarms[menuCursor].hour != ALARM_EMPTY_MARKER) {
+        alarms[menuCursor].enabled = !alarms[menuCursor].enabled;
+        saveAlarms();
+        tone(BUZZER_PIN, 1500, 20); // Короткий писк при переключении
+      } 
+      else {
+        menuCursor += dir;
+        if (menuCursor > MAX_ALARMS) menuCursor = 0;
+        if (menuCursor < 0) menuCursor = MAX_ALARMS;
+      }
+    } 
+    else if (currentScreen == SCREEN_EDIT_ALARM) {
+      if (editStep == 0) tempHour = (tempHour + dir + 24) % 24;
+      else if (editStep == 1) tempMinute = (tempMinute + dir + 60) % 60;
+      else if (editStep == 2) {
+        dayCursor += dir;
+        if (dayCursor > 7) dayCursor = 0;
+        if (dayCursor < 0) dayCursor = 7;
+      }
+    }
+  }
+
+  // 2. КЛИК (Только если кнопка НЕ была зажата во время поворота)
+  if (eb.click()) {
+    // Проверка: если мы крутили с зажатой кнопкой, EncButton может засчитать клик после отпускания.
+    // Большинство современных версий библиотеки это фильтруют, но если нет — проверяем состояние.
+    
+    needRedraw = true;
+    if (currentScreen == SCREEN_MAIN) {
+      currentScreen = SCREEN_MENU;
+      menuCursor = 0;
+    } 
+    else if (currentScreen == SCREEN_MENU) {
+      if (menuCursor == MAX_ALARMS) {
+        currentScreen = SCREEN_MAIN;
+      } else {
+        editAlarmIndex = menuCursor;
+        if (alarms[editAlarmIndex].hour == ALARM_EMPTY_MARKER) {
+          tempHour = 7; tempMinute = 0; tempDays = 127;
+        } else {
+          tempHour = alarms[editAlarmIndex].hour;
+          tempMinute = alarms[editAlarmIndex].minute;
+          tempDays = alarms[editAlarmIndex].days;
+        }
+        currentScreen = SCREEN_EDIT_ALARM;
+        editStep = 0; dayCursor = 0; lastStep = 255;
+      }
+    } 
+    else if (currentScreen == SCREEN_EDIT_ALARM) {
+      if (editStep < 2) editStep++;
+      else {
+        if (dayCursor == 7) {
+          alarms[editAlarmIndex].hour = tempHour;
+          alarms[editAlarmIndex].minute = tempMinute;
+          alarms[editAlarmIndex].days = tempDays;
+          alarms[editAlarmIndex].enabled = true;
+          saveAlarms();
+          currentScreen = SCREEN_MENU;
+        } else {
+          tempDays ^= (1 << dayCursor);
+        }
+      }
+    }
+  }
+
+  // 3. УДЕРЖАНИЕ (Удаление)
+  if (eb.hold()) {
+    if (currentScreen == SCREEN_MENU && menuCursor < MAX_ALARMS) {
+      if (alarms[menuCursor].hour != ALARM_EMPTY_MARKER) {
+        alarms[menuCursor].hour = ALARM_EMPTY_MARKER;
+        alarms[menuCursor].enabled = false;
+        saveAlarms();
+        tone(BUZZER_PIN, 800, 100); // Звук удаления (ниже тоном)
+        needRedraw = true;
+      }
+    }
   }
 }
 
 void setup() {
   Serial.begin(9600);
-  
-  // Инициализация дисплея GyverOLED
-  oled.init();
-  oled.clear();
-  oled.setScale(1);
-  
   Wire.setClock(400000L);
-  
-  // Настройка пинов
-  pinMode(PIN_ENC_CLK, INPUT);
-  pinMode(PIN_ENC_DT, INPUT);
-  pinMode(PIN_ENC_SW, INPUT_PULLUP);
-  pinMode(PIN_BUZZER, OUTPUT);
-  pinMode(PIN_LDR, INPUT);
-  
-  // Прерывание для энкодера (на Mega пин 2 - это INT0)
-  attachInterrupt(digitalPinToInterrupt(PIN_ENC_CLK), readEncoder, RISING);
+  oled.init();
+  oled.setContrast(20);
+  loadAlarms();
 
-  // Показываем экран подключения
-  oled.setCursor(0, 20);
-  oled.print("Connecting to PC...");
-  oled.update();
-  
-  // Инициализация будильников
-  // Пример: 1 активный будильник на будние дни в 7:30
-  alarms[0].hour = 7;
-  alarms[0].minute = 30;
-  alarms[0].active = true;
-  alarms[0].days[0] = true; // Пн
-  alarms[0].days[1] = true; // Вт
-  alarms[0].days[2] = true; // Ср
-  alarms[0].days[3] = true; // Чт
-  alarms[0].days[4] = true; // Пт
-  alarms[0].days[5] = false; // Сб
-  alarms[0].days[6] = false; // Вс
-  activeAlarmCount = 1;
-  
-  // Запрос времени при запуске
-  requestTimeSync();
+  // Попытка синхронизации при старте
+  if (syncTimeFromPC()) {
+    // Можно коротко пискнуть, если успешно
+    tone(BUZZER_PIN, 1500, 100); 
+  }
 }
 
 void loop() {
-  // 1. ЧТЕНИЕ ДАННЫХ ИЗ SERIAL (Синхронизация)
-  if (Serial.available() > 0) {
-    String input = Serial.readStringUntil('\n');
-    input.trim();
-    if (input.startsWith("S")) {
-      parseTime(input);
-    }
+  if (Serial.available() > 0 && Serial.read() == 'T') {
+    setTime(Serial.parseInt()); needRedraw = true;
+  }
+  handleInput();
+  checkAlarms();
+
+  if (currentScreen == SCREEN_EDIT_ALARM && millis() - lastBlink > 400) {
+    lastBlink = millis(); blinkState = !blinkState; needRedraw = true;
   }
 
-  // 2. ХОД ЧАСОВ
-  if (millis() - lastTick >= 1000) {
-    lastTick = millis();
-    if (timeSet) {
-      updateTime(); 
-    }
+  if (needRedraw) {
+    needRedraw = false;
+    if (currentScreen == SCREEN_MAIN) drawMainScreen();
+    else if (currentScreen == SCREEN_MENU) drawMenu();
+    else if (currentScreen == SCREEN_EDIT_ALARM) drawEditAlarm();
   }
-
-  // 3. ЛОГИКА (Энкодер и Будильник должны работать быстро)
-  handleInterface();
-  checkAlarm();
-
-  // 4. ОТРИСОВКА (Только раз в 100 мс = 10 кадров в секунду)
-  // Это уберет мерцание, так как мы не очищаем экран слишком часто
-  if (millis() - lastScreenUpdate > 100) { 
-    adjustBrightness(); // Проверяем яркость тоже не чаще раза в 0.1 сек
-    drawScreen();
-    lastScreenUpdate = millis();
-  }
-}
-
-// --- ФУНКЦИИ ЛОГИКИ ---
-
-void requestTimeSync() {
-  Serial.println("GET_TIME"); // Отправляем команду вашему Python скрипту
-  lastSync = millis();
-}
-
-void parseTime(String data) {
-  // data придет вида: S20250520143005
-  // Индексы: S(0) Y(1-4) M(5-6) D(7-8) H(9-10) M(11-12) S(13-14)
-  if (data.length() >= 15) {
-    year = data.substring(1, 5).toInt();
-    month = data.substring(5, 7).toInt();
-    day = data.substring(7, 9).toInt();
-    hour = data.substring(9, 11).toInt();
-    minute = data.substring(11, 13).toInt();
-    second = data.substring(13, 15).toInt();
-    timeSet = true;
-  }
-}
-
-void updateTime() {
-  second++;
-  if (second >= 60) {
-    second = 0;
-    minute++;
-    if (minute >= 60) {
-      minute = 0;
-      hour++;
-      if (hour >= 24) {
-        hour = 0;
-        // Здесь можно добавить логику смены дня, но без RTC
-        // проще синхронизироваться с ПК раз в сутки.
-        requestTimeSync(); 
-      }
-    }
-  }
-}
-
-void handleInterface() {
-  // 1. ОБРАБОТКА НАЖАТИЯ КНОПКИ (с поддержкой длинного нажатия)
-  bool buttonState = digitalRead(PIN_ENC_SW) == LOW;
-  
-  if (buttonState && !buttonPressed) {
-    // Начало нажатия
-    buttonPressed = true;
-    buttonPressStart = millis();
-  } else if (!buttonState && buttonPressed) {
-    // Кнопка отпущена
-    buttonPressed = false;
-    unsigned long pressDuration = millis() - buttonPressStart;
-    
-    if (pressDuration > 50 && pressDuration < 2000) {
-      // Короткое нажатие
-      if (millis() - lastButtonPress > 300) {
-        if (isAlarmRinging) {
-          // Если звонит будильник - кнопка выключает его
-          isAlarmRinging = false;
-          noTone(PIN_BUZZER);
-        } else {
-          handleButtonPress(); // Отдельная функция для обработки кнопки
-        }
-        lastButtonPress = millis();
-      }
-    } else if (pressDuration >= 2000) {
-      // Длинное нажатие (>= 2 секунды)
-      handleLongButtonPress();
-      lastButtonPress = millis();
-    }
-  } else if (buttonState && buttonPressed && (millis() - buttonPressStart > 2000)) {
-    // Длинное нажатие (обработка прямо во время нажатия, если нужно)
-    // Пока ничего не делаем, обработаем при отпускании
-  }
-
-  // 2. ОБРАБОТКА ВРАЩЕНИЯ
-  if (encoderPos != lastEncoderPos) {
-    int delta = encoderPos - lastEncoderPos;
-    handleRotation(delta); // Отдельная функция для обработки вращения
-    lastEncoderPos = encoderPos;
-  }
-}
-
-// --- ОТДЕЛЬНАЯ ЛОГИКА ДЛЯ КНОПКИ ---
-void handleButtonPress() {
-  switch (currentState) {
-    case STATE_CLOCK:
-      // В главном меню нажатие переходит в список будильников
-      currentState = STATE_ALARMS_LIST;
-      currentFocus = 0; // Сброс фокуса на первый элемент
-      break;
-      
-    case STATE_ALARMS_LIST:
-      // Если фокус на "Добавить будильник" (+)
-      if (currentFocus == activeAlarmCount) {
-        // Инициализация нового будильника
-        editingAlarmIndex = -1;
-        alarmToEdit.hour = 7;
-        alarmToEdit.minute = 0;
-        alarmToEdit.active = true;
-        for (int i = 0; i < 7; i++) {
-          alarmToEdit.days[i] = false;
-        }
-        editFocus = 0; // Начинаем с активности
-        currentState = STATE_ADD_ALARM;
-      } else if (currentFocus < activeAlarmCount) {
-        // Выбран существующий будильник, идем в режим редактирования
-        editingAlarmIndex = currentFocus;
-        alarmToEdit = alarms[currentFocus];
-        editFocus = 0; // Начинаем с активности
-        currentState = STATE_ADD_ALARM;
-      }
-      break;
-      
-    case STATE_ADD_ALARM:
-      // В режиме добавления - переход к следующему полю
-      // 0=Активность, 1=Час, 2=Минута, 3-9=Дни недели (7 дней), 10=Сохранить/Отменить
-      if (editFocus < 9) {
-        editFocus++;
-      } else if (editFocus == 9) {
-        // Переход к опции "Сохранить"
-        editFocus = 10;
-        currentFocus = 0; // 0 = Сохранить, 1 = Отменить
-      } else if (editFocus == 10) {
-        // На опции "Сохранить/Отменить" - нажатие выполняет действие
-        if (currentFocus == 0) {
-          // Сохранить будильник
-          if (editingAlarmIndex == -1) {
-            // Добавляем новый будильник
-            if (activeAlarmCount < MAX_ALARMS) {
-              alarms[activeAlarmCount] = alarmToEdit;
-              activeAlarmCount++;
-            }
-          } else {
-            // Обновляем существующий будильник
-            alarms[editingAlarmIndex] = alarmToEdit;
-          }
-          currentState = STATE_ALARMS_LIST;
-          editFocus = 0;
-        } else {
-          // Отменить редактирование
-          currentState = STATE_ALARMS_LIST;
-          editFocus = 0;
-        }
-      }
-      break;
-
-    case STATE_DELETE_ALARM:
-      // Подтверждение удаления
-      if (currentFocus == 0) {
-        // Удаляем будильник
-        if (editingAlarmIndex >= 0 && editingAlarmIndex < activeAlarmCount) {
-          // Сдвигаем все будильники влево
-          for (int i = editingAlarmIndex; i < activeAlarmCount - 1; i++) {
-            alarms[i] = alarms[i + 1];
-          }
-          activeAlarmCount--;
-        }
-      }
-      currentState = STATE_ALARMS_LIST;
-      currentFocus = 0;
-      break;
-      
-    case STATE_SETTINGS_TIME:
-      // В настройках времени - возврат в главное меню
-      currentState = STATE_CLOCK;
-      break;
-  }
-  
-  // После смены состояния, часто полезно сбросить энкодер, чтобы избежать случайного скролла
-  encoderPos = 0; 
-  lastEncoderPos = 0;
-}
-
-// Обработка длинного нажатия кнопки
-void handleLongButtonPress() {
-  switch (currentState) {
-    case STATE_ALARMS_LIST:
-      // Длинное нажатие в списке будильников = удаление выбранного будильника
-      if (currentFocus < activeAlarmCount && activeAlarmCount > 0) {
-        editingAlarmIndex = currentFocus;
-        currentFocus = 0; // По умолчанию выбираем "YES"
-        currentState = STATE_DELETE_ALARM;
-      }
-      break;
-      
-    case STATE_ADD_ALARM:
-      // Длинное нажатие при редактировании = отмена и возврат в список
-      currentState = STATE_ALARMS_LIST;
-      editFocus = 0;
-      break;
-      
-    default:
-      // В других состояниях длинное нажатие ничего не делает
-      break;
-  }
-  
-  encoderPos = 0;
-  lastEncoderPos = 0;
-}
-
-// --- ОТДЕЛЬНАЯ ЛОГИКА ДЛЯ ВРАЩЕНИЯ ---
-void handleRotation(int delta) {
-  switch (currentState) {
-    case STATE_CLOCK:
-      // В главном меню можно сразу перейти в Настройку времени
-      if (delta > 0) {
-        currentState = STATE_SETTINGS_TIME;
-      }
-      break;
-
-    case STATE_ALARMS_LIST:
-      // Скроллинг списка будильников
-      currentFocus += delta;
-      // Ограничение фокуса: от 0 до (количество будильников + кнопка "Добавить")
-      int maxFocus = activeAlarmCount;
-      if (activeAlarmCount < MAX_ALARMS) {
-        maxFocus = activeAlarmCount; // Включая кнопку "Добавить"
-      }
-      currentFocus = constrain(currentFocus, 0, maxFocus);
-      break;
-      
-    case STATE_ADD_ALARM:
-      // Изменение значения в текущем поле фокуса
-      if (editFocus == 0) { // Фокус на Активности (включен/выключен)
-        // Переключаем активность будильника
-        if (delta != 0) {
-          alarmToEdit.active = !alarmToEdit.active;
-        }
-      } else if (editFocus == 1) { // Фокус на Часах
-        alarmToEdit.hour += delta;
-        alarmToEdit.hour = constrain(alarmToEdit.hour, 0, 23);
-      } else if (editFocus == 2) { // Фокус на Минутах
-        alarmToEdit.minute += delta;
-        alarmToEdit.minute = constrain(alarmToEdit.minute, 0, 59);
-      } else if (editFocus >= 3 && editFocus <= 9) { // Дни недели (3-9)
-        int dayIndex = editFocus - 3;
-        // Переключаем день только при вращении вперед (delta > 0)
-        if (delta > 0) {
-          alarmToEdit.days[dayIndex] = !alarmToEdit.days[dayIndex];
-        }
-      } else if (editFocus == 10) { // Фокус на кнопке "Сохранить/Отменить"
-        // Вращение переключает между "Сохранить" (0) и "Отменить" (1)
-        currentFocus += delta;
-        currentFocus = constrain(currentFocus, 0, 1);
-      }
-      break;
-      
-    case STATE_SETTINGS_TIME:
-      // Здесь можно добавить настройку времени через вращение
-      break;
-      
-    case STATE_DELETE_ALARM:
-      // Выбор: подтвердить или отменить
-      currentFocus += delta;
-      currentFocus = constrain(currentFocus, 0, 1);
-      break;
-  }
-}
-
-void checkAlarm() {
-  // Проверка всех активных будильников (только если время установлено и секунды = 0)
-  if (!isAlarmRinging && timeSet && second == 0) {
-    // Получаем день недели (упрощенная версия, нужен правильный расчет)
-    int dayOfWeek = getDayOfWeek(); // 0 = Пн, 6 = Вс
-    
-    for (int i = 0; i < activeAlarmCount; i++) {
-      if (alarms[i].active && 
-          hour == alarms[i].hour && 
-          minute == alarms[i].minute &&
-          alarms[i].days[dayOfWeek]) {
-        isAlarmRinging = true;
-        break;
-      }
-    }
-  }
-
-  // Звук будильника (пиканье)
-  if (isAlarmRinging) {
-    if (millis() - buzzerTimer > 500) { // Каждые 500мс
-      buzzerTimer = millis();
-      buzzerState = !buzzerState;
-      if (buzzerState) tone(PIN_BUZZER, 2000); // 2kHz звук
-      else noTone(PIN_BUZZER);
-    }
-  } else {
-    noTone(PIN_BUZZER);
-  }
-}
-
-// Вспомогательная функция для получения дня недели
-// Использует алгоритм Зеллера для расчета дня недели
-// Возвращает: 0=Понедельник, 1=Вторник, ..., 6=Воскресенье
-int getDayOfWeek() {
-  if (!timeSet) return 0; // Если время не установлено, возвращаем понедельник
-  
-  int y = year;
-  int m = month;
-  int d = day;
-  
-  // Алгоритм Зеллера (адаптирован для понедельника = 0)
-  if (m < 3) {
-    m += 12;
-    y--;
-  }
-  
-  int k = y % 100;
-  int j = y / 100;
-  int h = (d + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
-  
-  // Преобразуем результат: 0=Суббота, 1=Воскресенье, ..., 6=Пятница
-  // Нам нужно: 0=Понедельник, ..., 6=Воскресенье
-  int dayOfWeek = (h + 5) % 7;
-  return dayOfWeek;
-}
-
-void adjustBrightness() {
-  int ldrValue = analogRead(PIN_LDR); // 0 (светло) - 1023 (темно) или наоборот, зависит от схемы
-  // Для OLED SSD1306 настройка контраста
-  // Обычно ldrValue: много света -> нужна высокая яркость
-  // Мало света -> низкая яркость
-  
-  // Предположим схему: 5V -> LDR -> A0 -> 10k -> GND. 
-  // Тогда Свет = высокое напряжение (большое значение). Темнота = малое.
-  
-  int contrast = map(ldrValue, 0, 1023, 0, 255);
-  oled.setContrast(contrast);
-}
-
-void drawScreen() {
-  oled.clear();
-  
-  switch (currentState) {
-    case STATE_CLOCK:
-      drawClockScreen();
-      break;
-      
-    case STATE_ALARMS_LIST:
-      drawAlarmListScreen();
-      break;
-      
-    case STATE_SETTINGS_TIME:
-      drawSettingsScreen();
-      break;
-      
-    case STATE_ADD_ALARM:
-      drawAddAlarmScreen();
-      break;
-      
-    case STATE_DELETE_ALARM:
-      drawDeleteAlarmScreen();
-      break;
-  }
-  
-  oled.update();
-}
-
-// Функция отрисовки главного экрана (часы)
-void drawClockScreen() {
-  oled.home();
-  oled.setScale(4);
-  if (!timeSet) {
-    oled.print("--:--");
-  } else {
-    if (hour < 10) oled.print("0");
-    oled.print(hour);
-    oled.print(":");
-    if (minute < 10) oled.print("0");
-    oled.print(minute);
-  }
-
-  // Показываем секунды мелким шрифтом
-  oled.setScale(1);
-  oled.setCursor(85, 5);
-  oled.print(":");
-  if (second < 10) oled.print("0");
-  oled.print(second);
-
-  // Показываем дату
-  oled.setCursor(30, 50);
-  if (timeSet) {
-    if (day < 10) oled.print("0");
-    oled.print(day);
-    oled.print(".");
-    if (month < 10) oled.print("0");
-    oled.print(month);
-    oled.print(".");
-    oled.print(year);
-  } else {
-    oled.print("--.--.----");
-  }
-
-  // Показываем количество активных будильников
-  oled.setCursor(0, 40);
-  oled.print("Alarms: ");
-  int activeCount = 0;
-  for (int i = 0; i < activeAlarmCount; i++) {
-    if (alarms[i].active) activeCount++;
-  }
-  oled.print(activeCount);
-  oled.print("/");
-  oled.print(activeAlarmCount);
-
-  // Индикация будильника
-  if (isAlarmRinging) {
-    oled.setCursor(20, 25);
-    oled.print("!!! WAKE UP !!!");
-  }
-}
-
-// Функция отрисовки списка будильников
-void drawAlarmListScreen() {
-  oled.setScale(1);
-  oled.setCursor(0, 0);
-  oled.print("ALARMS:");
-  
-  // Рисуем существующие будильники
-  for (int i = 0; i < activeAlarmCount; i++) {
-    int y = 10 + i * 10;
-    
-    // Рисуем рамку, если текущий будильник в фокусе
-    if (i == currentFocus) {
-      oled.rect(0, y - 1, 128, 10, OLED_STROKE);
-    }
-    
-    // Статус активности
-    oled.setCursor(2, y);
-    if (alarms[i].active) {
-      oled.print("[*]");
-    } else {
-      oled.print("[ ]");
-    }
-    
-    // Время будильника
-    oled.setCursor(22, y);
-    if (alarms[i].hour < 10) oled.print("0");
-    oled.print(alarms[i].hour);
-    oled.print(":");
-    if (alarms[i].minute < 10) oled.print("0");
-    oled.print(alarms[i].minute);
-    
-    // Дни недели (краткая форма)
-    oled.setCursor(65, y);
-    const char dayChars[] = "MTWTFSS";
-    for (int d = 0; d < 7; d++) {
-      if (alarms[i].days[d]) {
-        oled.print(dayChars[d]);
-      } else {
-        oled.print(" ");
-      }
-    }
-  }
-  
-  // Кнопка "Добавить будильник"
-  int addY = 10 + activeAlarmCount * 10;
-  if (activeAlarmCount < MAX_ALARMS) {
-    if (currentFocus == activeAlarmCount) {
-      oled.rect(0, addY - 1, 128, 11, OLED_STROKE);
-    }
-    oled.setCursor(2, addY);
-    oled.print("[+] Add Alarm");
-  }
-}
-
-// Функция отрисовки экрана добавления/редактирования будильника
-void drawAddAlarmScreen() {
-  oled.setScale(1);
-  oled.setCursor(0, 0);
-  if (editingAlarmIndex == -1) {
-    oled.print("NEW ALARM:");
-  } else {
-    oled.print("EDIT ALARM:");
-  }
-  
-  if (editFocus == 0) {
-    // Активность
-    oled.setCursor(0, 15);
-    oled.print(">Active: ");
-    if (alarmToEdit.active) {
-      oled.print("ON ");
-    } else {
-      oled.print("OFF");
-    }
-  } else if (editFocus == 1 || editFocus == 2) {
-    // Редактирование времени с рамкой фокуса
-    oled.setScale(4);
-    
-    // Часы
-    int hourX = 10;
-    int hourY = 10;
-    oled.setCursor(hourX, hourY);
-    if (alarmToEdit.hour < 10) oled.print("0");
-    oled.print(alarmToEdit.hour);
-    
-    // Разделитель
-    oled.setCursor(55, hourY);
-    oled.print(":");
-    
-    // Минуты
-    int minX = 65;
-    int minY = 10;
-    oled.setCursor(minX, minY);
-    if (alarmToEdit.minute < 10) oled.print("0");
-    oled.print(alarmToEdit.minute);
-    
-    // Рамка фокуса вокруг активного поля
-    if (editFocus == 1) {
-      // Рамка вокруг часов (x, y, width, height)
-      oled.rect(8, 8, 47, 37, OLED_STROKE);
-    } else if (editFocus == 2) {
-      // Рамка вокруг минут (x, y, width, height)
-      oled.rect(63, 8, 47, 37, OLED_STROKE);
-    }
-    
-    // Дни недели внизу
-    oled.setScale(1);
-    oled.setCursor(0, 55);
-    const char dayChars[] = "MTWTFSS";
-    for (int i = 0; i < 7; i++) {
-      if (alarmToEdit.days[i]) {
-        oled.print(dayChars[i]);
-      } else {
-        oled.print("-");
-      }
-      oled.print(" ");
-    }
-  } else if (editFocus >= 3 && editFocus <= 9) {
-    // Показываем дни недели с выделением
-    oled.setScale(1);
-    oled.setCursor(0, 15);
-    const char* dayNames[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
-    for (int i = 0; i < 7; i++) {
-      int y = 15 + (i % 4) * 12;
-      int x = (i < 4) ? 0 : 64;
-      
-      oled.setCursor(x, y);
-      if (editFocus == i + 3) {
-        oled.print(">");
-      } else {
-        oled.print(" ");
-      }
-      oled.print(dayNames[i]);
-      oled.print(": ");
-      if (alarmToEdit.days[i]) {
-        oled.print("ON");
-      } else {
-        oled.print("OFF");
-      }
-    }
-  } else if (editFocus == 10) {
-    // Экран подтверждения сохранения
-    oled.setScale(1);
-    oled.setCursor(0, 20);
-    oled.print("Save changes?");
-    
-    oled.setCursor(0, 40);
-    if (currentFocus == 0) oled.print(">");
-    else oled.print(" ");
-    oled.print("YES - Save");
-    
-    oled.setCursor(0, 50);
-    if (currentFocus == 1) oled.print(">");
-    else oled.print(" ");
-    oled.print("NO - Cancel");
-  }
-  
-  // Подсказка (только если не на экране сохранения и не редактируем время)
-  if (editFocus < 10 && editFocus != 1 && editFocus != 2) {
-    oled.setScale(1);
-    oled.setCursor(0, 55);
-    oled.print("Rotate  Btn=Next  Hold=Cancel");
-  }
-}
-
-// Функция отрисовки экрана настроек времени
-void drawSettingsScreen() {
-  oled.setScale(1);
-  oled.setCursor(0, 0);
-  oled.print("TIME SETTINGS:");
-  
-  oled.setCursor(0, 15);
-  oled.print("Sync from PC only");
-  
-  oled.setCursor(0, 25);
-  oled.print("Current time:");
-  
-  oled.setScale(2);
-  oled.setCursor(20, 35);
-  if (timeSet) {
-    if (hour < 10) oled.print("0");
-    oled.print(hour);
-    oled.print(":");
-    if (minute < 10) oled.print("0");
-    oled.print(minute);
-  } else {
-    oled.print("--:--");
-  }
-  
-  oled.setScale(1);
-  oled.setCursor(0, 55);
-  oled.print("Press Btn to return");
-}
-
-// Функция отрисовки экрана подтверждения удаления
-void drawDeleteAlarmScreen() {
-  oled.setScale(1);
-  oled.setCursor(0, 0);
-  oled.print("DELETE ALARM?");
-  
-  if (editingAlarmIndex >= 0 && editingAlarmIndex < activeAlarmCount) {
-    oled.setCursor(0, 15);
-    if (alarms[editingAlarmIndex].hour < 10) oled.print("0");
-    oled.print(alarms[editingAlarmIndex].hour);
-    oled.print(":");
-    if (alarms[editingAlarmIndex].minute < 10) oled.print("0");
-    oled.print(alarms[editingAlarmIndex].minute);
-  }
-  
-  oled.setCursor(0, 35);
-  if (currentFocus == 0) oled.print(">");
-  else oled.print(" ");
-  oled.print("YES - Delete");
-  
-  oled.setCursor(0, 45);
-  if (currentFocus == 1) oled.print(">");
-  else oled.print(" ");
-  oled.print("NO - Cancel");
 }
