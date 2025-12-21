@@ -3,7 +3,7 @@ BasedOnStyle: GNU
 IndentWidth: 2
 TabWidth: 2
 UseTab: Never
-ColumnLimit: 100
+ColumnLimit: 120
 AllowShortIfStatementsOnASingleLine: false
 BreakBeforeBraces: Allman
 AlignConsecutiveAssignments: AcrossEmptyLinesAndComments

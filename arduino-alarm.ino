@@ -1,174 +1,193 @@
+#include "./b-movie-hex.h"
 #include <U8g2lib.h>
 #include <Wire.h>
 
-#define BEEPER  DD2
-#define ENC_BTN DD3
-#define ENC_S1  DD4
-#define ENC_S2  DD5
+#define OLED_DATA  4
+#define OLED_CLOCK 5
+#define OLED_RESET U8X8_PIN_NONE
 
-U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+#define SCR_W      128
+#define SCR_H      64
 
-// Variables are first 4 bytes, so its easy to empty just by casting a pointer to uint32_t and
-// setting it to 0, like a free optimization
-struct EncoderInput
+#define BEEPER     2
+#define ENC_BTN    3
+#define ENC_S1     10
+#define ENC_S2     11
+
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, OLED_CLOCK, OLED_DATA, U8X8_PIN_NONE);
+
+const char* todrawtext = (const char*)b_movie_txt;
+//
+// auto todrawtext     = "Тест! 123";
+auto todrawtext_len    = strlen(todrawtext);
+
+struct DrawLineResult
 {
-  bool keyHeld      = false;
-  bool keyPressed   = false;
-  bool turnedLeft   = false;
-  bool turnedRight  = false;
-  bool last_state_a = false;
-  bool last_active  = false;
-  bool last_key     = false;
+  uint8_t end_x, end_y;
+  size_t drawn_text;
 };
 
-int position        = 0;
-int lpp             = 0;
-int upd_timeout     = 10000;
-int upd_timer       = 0;
-
-bool screen_updated = false;
-bool update_screen  = false;
-
-bool change_time    = false;
-
-long time           = 0;
-unsigned long long previousMillis;
-
-struct EncoderInput encoderInput;
-
-void handleEncoder(struct EncoderInput& write_to)
+size_t getUTF8Len(const char* s)
 {
-  *(uint32_t*)(&write_to) = 0; // a little optimization :3
-  bool b                  = !digitalRead(ENC_S1);
-  bool a                  = !digitalRead(ENC_S2);
-  write_to.keyHeld        = digitalRead(ENC_BTN);
-  write_to.keyPressed     = write_to.keyHeld && (write_to.keyHeld != write_to.last_key);
-  write_to.last_key       = write_to.keyHeld;
+  size_t l;
+  for(l = 0; *s; s++)
+    l += (*s - 0x80U >= 0x40) + (*s >= 0xf0);
+  return l;
+}
 
-  if(a || b)
+uint16_t utf8_to_unicode(const char* utf8, int* bytes_used)
+{
+  uint8_t c = utf8[0];
+  if(c < 0x80)
   {
-    if(a && b)
+    *bytes_used = 1;
+    return c;
+  }
+  if((c & 0xE0) == 0xC0)
+  {
+    *bytes_used = 2;
+    return ((c & 0x1F) << 6) | (utf8[1] & 0x3F);
+  }
+  if((c & 0xF0) == 0xE0)
+  {
+    *bytes_used = 3;
+    return ((c & 0x0F) << 12) | ((utf8[1] & 0x3F) << 6) | (utf8[2] & 0x3F);
+  }
+  *bytes_used = 1;
+  return '?';
+}
+
+DrawLineResult drawTextLine(const char* text, const uint8_t x_start, const uint8_t y_start)
+{
+  const char* text_start = text;
+  uint8_t x = x_start, y = y_start;
+
+  do
+  {
+    int uni_byte_len = 0;
+    x += u8g2.drawGlyph(x, y, utf8_to_unicode(text, &uni_byte_len));
+    if(x >= SCR_W - 8)
     {
-      if(!write_to.last_active)
-      {
-        if(write_to.last_state_a)
-        {
-          write_to.turnedRight = true;
-        }
-        else
-        {
-          write_to.turnedLeft = true;
-        }
-      }
-      write_to.last_active = true;
+      y += u8g2.getMaxCharHeight();
+      x = x_start;
+      if(y > (SCR_H - u8g2.getMaxCharHeight()))
+        break;
     }
-    write_to.last_state_a = a;
-  }
-  else
+    text += uni_byte_len;
+  } while(*text && *text != '\n');
+
+  return { .end_x = x, .end_y = y, .drawn_text = (size_t)(text - text_start) };
+}
+
+class EncoderHandler
+{
+public:
+  EncoderHandler(uint8_t s1, uint8_t s2) : pin_s1(s1), pin_s2(s2) { last_used_s1 = digitalRead(pin_s1); };
+
+  void update()
   {
-    write_to.last_active = false;
+    bool s1 = digitalRead(pin_s1);
+    bool s2 = digitalRead(pin_s2);
+
+    if(s1 == HIGH && last_used_s1 == LOW)
+    {
+      if(s2 == HIGH)
+      {
+        Serial.println("++");
+        delta++;
+      }
+      else
+      {
+        Serial.println("--");
+        delta--;
+      }
+    }
+
+    last_used_s1 = s1;
   }
-}
+  int8_t getDelta() { return delta; };
+  void clear() { delta = 0; }
 
-#define MENU_ENTRY_UNKNOWN 0x0
-#define MENU_ENTRY_NUMBER  0x1
-
-template <typename T> class BasicMenuEntry;
-
-class Menu
-{
-  BasicMenuEntry<void>* m_entries; // We dont know types of these entries, we can later cast them to
-                                   // appropriate types by getting their first byte
-  uint8_t entry_count;
+private:
+  uint8_t pin_s1, pin_s2;
+  bool last_used_s1;
+  bool last_active;
+  int8_t delta = 0;
 };
 
-template <typename T> class BasicMenuEntry
-{
-  uint8_t type;
-  uint8_t data_count;
-  T* m_data;
-};
-
-class MenuEntryNumber : public BasicMenuEntry<int>
-{
-};
-
-void dispUpdate()
-{
-  u8g2.clearBuffer();
-  u8g2.drawStr(0, 15, String(position).c_str());
-  u8g2.drawStr(32, 15, String(time).c_str());
-  u8g2.sendBuffer();
-}
+EncoderHandler enc_handler(ENC_S1, ENC_S2);
 
 void setup()
 {
-  // put your setup code here, to run once:
-  Serial.begin(9600);
-  Serial.println("Start test!");
+  Wire.begin(OLED_DATA, OLED_CLOCK);
+  Wire.setClock(400000);
+
+  u8g2.begin();
+  u8g2.setFont(u8g2_font_5x8_t_cyrillic);
+
+  Serial.begin(115200);
+  while(!Serial)
+    ;
+  Serial.println("BEGIN");
 
   pinMode(ENC_S1, INPUT);
   pinMode(ENC_S2, INPUT);
-  pinMode(ENC_BTN, INPUT);
-  pinMode(BEEPER, OUTPUT);
-
-  u8g2.begin();
-  u8g2.setFont(u8g2_font_ncenB10_tr);
 }
+
+long long cur_pos = 0;
+
+int scr_upd_bruh  = 0;
 
 void loop()
 {
-  unsigned long currentMillis = millis(); // Get the current time
 
-  // Check if the interval has passed since the last count
-  if(currentMillis - previousMillis >= 1000)
+  enc_handler.update();
+  if(enc_handler.getDelta() != 0)
   {
-    previousMillis = currentMillis;
-    time++;
-    update_screen = true;
-  }
-
-  if(lpp != position)
-  {
-    lpp = position;
-    Serial.println(position);
-  }
-  handleEncoder(encoderInput);
-
-  if(encoderInput.keyPressed)
-  {
-    change_time = !change_time;
-  }
-
-  if(change_time)
-  {
-    if(encoderInput.turnedRight)
+    scr_upd_bruh = 0;
+    if(enc_handler.getDelta() > 0)
     {
-      time++;
+      if(cur_pos < todrawtext_len)
+      {
+        cur_pos = (long long)(strchr((const char*)todrawtext + cur_pos, '\n') - (const char*)todrawtext) + 1;
+      }
     }
-    else if(encoderInput.turnedLeft)
+    else if(enc_handler.getDelta() < 0)
     {
-      time--;
+      while(cur_pos > 0 && todrawtext[--cur_pos - 1] != '\n')
+        ;
     }
   }
+  enc_handler.clear();
 
-  if(update_screen)
+  if(cur_pos < 0)
   {
-    upd_timer      = upd_timeout;
-    screen_updated = false;
-    update_screen  = 0;
+    cur_pos = 0;
+  }
+  else if(cur_pos > todrawtext_len)
+  {
+    cur_pos = todrawtext_len;
   }
 
-  if(upd_timer <= 0)
+  if(scr_upd_bruh == -100000)
   {
-    if(!screen_updated)
+
+    u8g2.clearBuffer();
+
+    uint8_t y          = u8g2.getMaxCharHeight();
+    size_t chars_drawn = cur_pos;
+    do
     {
-      dispUpdate();
-      screen_updated = true;
-    }
+      auto end = drawTextLine((const char*)todrawtext + chars_drawn, 0, y);
+      y        = end.end_y + u8g2.getMaxCharHeight();
+      chars_drawn += end.drawn_text;
+    } while(chars_drawn <= todrawtext_len && y < (SCR_H - u8g2.getMaxCharHeight()));
+
+    char buff[32];
+    sprintf(buff, "L %ld/%ld - %ld%%", (long)cur_pos, (long)todrawtext_len, (cur_pos * 100) / todrawtext_len);
+    u8g2.drawStr(0, 64, buff);
+
+    u8g2.sendBuffer();
   }
-  else
-  {
-    upd_timer--;
-  }
+  scr_upd_bruh--;
 }
